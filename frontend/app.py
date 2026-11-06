@@ -1,8 +1,9 @@
 """Minimal Streamlit chat for the multi-agent system. It only talks to the HTTP API.
 
-    streamlit run src/frontend/app.py
+    uv run streamlit run app.py      (from the frontend/ folder)
 
-The API must be running (``python main.py``). Set ``API_URL`` if it is not on localhost:8000.
+The backend must be running (``python main.py`` in backend/). Set ``API_URL`` if it is not on localhost:8000.
+This file is self-contained: it imports nothing from the backend, it only calls its HTTP API.
 """
 import os
 
