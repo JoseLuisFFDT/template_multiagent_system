@@ -40,6 +40,45 @@ Models are set in `agents_config.yaml` (change the `model` fields if your Groq a
 waiting for approval. If the graph itself fails (for example the LLM provider is down) the API answers `502` with the
 reason in `detail`, instead of a bare `500`.
 
+### Call the API from the terminal
+
+With the server running (`uv run python main.py`), open **another terminal** and send a prompt. Three ways, from most to least
+convenient:
+
+**1. The interactive docs.** Open http://127.0.0.1:8000/docs, expand `POST /chat`, press *Try it out*, write the message and
+*Execute*. FastAPI generates this page; no commands needed.
+
+**2. PowerShell (`Invoke-RestMethod`).** It parses the JSON for you:
+
+```powershell
+$body  = @{ message = "Reverse the text 'langgraph'" } | ConvertTo-Json
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($body)      # keeps accents and "ñ" intact
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8000/chat -Method Post `
+       -ContentType "application/json; charset=utf-8" -Body $bytes
+
+$r.route          # which agent answered
+$r.answer         # the answer
+$r.trace.node     # the nodes that ran, in order
+```
+
+**3. `curl.exe`.** Type `curl.exe` with the extension: in Windows PowerShell plain `curl` is an alias of another command.
+
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" `
+         -d '{\"message\": \"Hi! What can you do?\"}'
+```
+
+If `$r.status` is `needs_approval` (for example the `subgraph_agent` route), the graph is paused. Resume it with the
+`thread_id` from that response; `approved = $false` rejects it:
+
+```powershell
+$body = @{ thread_id = $r.thread_id; approved = $true } | ConvertTo-Json
+Invoke-RestMethod -Uri http://127.0.0.1:8000/approve -Method Post -ContentType "application/json" -Body $body
+```
+
+To check that the server is up: `Invoke-RestMethod http://127.0.0.1:8000/health` returns `status ok`. Without any server, see
+[Talk to the mastermind from the terminal](#talk-to-the-mastermind-from-the-terminal) (`cli.py`).
+
 ### The trace: how the state evolves
 
 Every response carries a `trace`: the steps the graph executed **during that call**, in order, including the steps of
@@ -66,11 +105,6 @@ approval flow, `/chat` returns the trace up to the pause and `/approve` returns 
 It is built in `src/api/trace.py` with `graph.astream(..., stream_mode=["updates", "values"], subgraphs=True)`: `updates` gives what a
 node returned, `values` gives the full state, and each update is paired with the snapshot that follows it. The trace comes back
 when the call finishes; it is not streamed live.
-
-```powershell
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" `
-     -d '{\"message\": \"Reverse the text langgraph\"}'
-```
 
 How the pieces fit: the graph is built once when the server starts (`create_app` in `src/api/app.py`). Its checkpointer lives in
 the server's memory, which is what lets `/approve` resume the run that `/chat` started. Consequences: a server restart forgets
