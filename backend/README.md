@@ -168,6 +168,43 @@ MainState.human_message --(IN)--> SubgraphState.topic
 SubgraphState.result    --(OUT)-> MainState.ai_message      (the only key written back)
 ```
 
+### Why two states and two graphs (and not one big graph)
+
+Nothing forces this design. You could make `planner_agent`, `worker` and `assemble` plain nodes of the main graph and add
+`topic`, `plan`, `answers` and `result` to `MainState`. It would run. This is what that would look like, and what we avoid:
+
+```python
+class MainState(BaseModel):                       # flattened: NOT how this repo does it
+    human_message: str
+    route: str | None = None
+    messages: Annotated[list[AnyMessage], add_messages] = []
+    approval: Literal["approved", "rejected"] | None = None
+    ai_message: str | None = None
+    topic: str | None = None                      # <- only the subgraph needs these four
+    plan: Plan | None = None
+    answers: Annotated[list[str], operator.add] = []   # <- and this reducer now applies to the WHOLE graph
+    result: str | None = None
+```
+
+| Reason | If everything lived in one state and one graph | In this repo |
+|---|---|---|
+| **The main state stays a small contract** | Every agent (`chat_agent`, `tool_agent`...) carries the subgraph's scratch data. It shows up in every checkpoint and in `aget_state`. | `MainState` has 5 keys. `plan` and `answers` never appear in it (`test_2_a`, `test_2_d`). |
+| **No key collisions** | Reducers belong to a key and apply to the whole graph. Generic names like `result` or `plan` collide as soon as a second feature needs them, and a node that wanted to *overwrite* `answers` would silently *append*. | Each graph owns its keys. A second subgraph can have its own `result` without conflict. |
+| **Intermediate data has a lifecycle** | The N workers' partial answers stay in the main state until the run ends. | They live and die inside the subgraph. Only the final text crosses back. |
+| **The inner graph is runnable and testable alone** | To test the fan-out you have to build the mastermind, the checkpointer and the `interrupt`. | `build_subgraph()` compiles by itself; `tests/test_subgraph.py` runs it with no main graph at all. |
+| **The main graph stays readable** | `main_graph.py` fills up with the planner, N workers, the fan-in, the retry policy... | The main graph shows **one node**, `subgraph_agent`. `Send`, the fan-in and the `RetryPolicy` on the planner are internal details. |
+| **Internals can change freely** | Adding a reviewer loop or more workers means editing the main graph and maybe its state. | Change the subgraph as you like; as long as the adapter contract holds (`topic` in, `result` out), `main_graph.py` does not change. |
+| **Reuse and ownership** | The nodes are welded to the main graph's state. | The same subgraph can serve another parent graph with a different adapter, or be owned by another team. |
+
+**What it costs.** You write and maintain the adapter (`SubgraphAgent.ask`), and data crosses the border only if you map it
+explicitly: if the main graph or the UI also needed the `plan`, you would have to copy it out on purpose. That friction is the
+point (nothing leaks by accident), but it is not free.
+
+**When not to do it.** If parent and child naturally work on the *same* data (typically both read and write `messages`), a subgraph
+with **shared keys** is simpler: no adapter, just `builder.add_node("name", compiled_subgraph)`. Rule of thumb: separate states when
+the subgraph has its own private working data (like `plan` and `answers` here); share keys when it is just a way to group
+nodes that operate on the same state.
+
 ### What happens, step by step
 
 | Step | Node | Reads | Writes | What happens |
