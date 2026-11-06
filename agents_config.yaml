@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────
+# Agent LLM configuration
+#
+# defaults – values used by every agent that does not override them.
+# agents   – per-agent overrides; any field omitted falls back to `defaults`.
+#            The key MUST match the agent's `name` class attribute exactly. If it does not
+#            match, the agent silently runs with the defaults.
+#
+# Supported fields:
+#   model        (str)    – model identifier
+#   temperature  (float)  – sampling temperature, 0.0 = deterministic
+#   max_tokens   (int)    – max completion tokens (reasoning models count hidden reasoning too)
+#   api_key_env  (str)    – NAME of the environment variable holding the API key (set it in .env).
+#   output_model (str)    – dotted path of the Pydantic class the agent must return
+#                           (only for agents that call BaseAgent.structured_invoke)
+# ─────────────────────────────────────────────────────────────────
+defaults:
+  api_key_env: "GROQ_API_KEY"
+  model: "openai/gpt-oss-120b"
+  temperature: 0.0
+  max_tokens: 4000
+
+agents:
+  mastermind_agent:                       # router: needs a small, fast model
+    model: "openai/gpt-oss-20b"
+    output_model: "src.pydantic_models.agents.mastermind_agent.RouteDecision"
+
+  chat_agent:
+    temperature: 0.7
+
+  tool_agent: {}                          # tool-calling agent: uses the defaults
+  mcp_agent: {}                           # MCP agent: uses the defaults
+
+  # subgraph_agent has no entry on purpose: it does not call an LLM (requires_llm = False).
+  planner_agent:                          # subgraph
+    output_model: "src.pydantic_models.agents.planner_agent.Plan"
+  worker_agent: {}                        # subgraph
