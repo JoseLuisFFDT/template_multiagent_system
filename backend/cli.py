@@ -1,8 +1,9 @@
 """Command-line demo of the template.
 
-    python main.py                       # runs one demo request per route
-    python main.py "What is 2 + 3?"      # runs your own request
-    python main.py --auto-approve "Answer in parallel: what is a cat, a dog and a bird?"
+    python cli.py                       # runs one demo request per route
+    python cli.py --chat                # interactive: type requests, the mastermind routes them
+    python cli.py "What is 2 + 3?"      # runs your own request
+    python cli.py --auto-approve "Answer in parallel: what is a cat, a dog and a bird?"
 
 While the graph runs you see every node that executes (``->``). Nodes of the subgraph are
 indented. When the subgraph agent answers, the graph pauses (human-in-the-loop) and asks you
@@ -66,6 +67,13 @@ async def main() -> None:
     auto_approve = "--auto-approve" in sys.argv
 
     graph = build_main_graph()
+
+    if "--chat" in sys.argv:
+        # Each line you type is a new request (a new thread_id): there is no memory between them.
+        while message := input("\nYou (empty line to exit): ").strip():
+            await run_request(graph, message, auto_approve=auto_approve)
+        return
+
     for message in args or DEMO_REQUESTS:
         # Without a message on the command line the demo must not stop to ask a human.
         await run_request(graph, message, auto_approve=auto_approve or not args)

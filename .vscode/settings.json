@@ -1,0 +1,11 @@
+{
+    // Default interpreter for the repo root: the backend's environment (it has langchain, pytest...).
+    // The frontend has its own .venv; its launch configuration pins it explicitly.
+    "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+
+    // Test panel (beaker icon): run the backend tests from backend/, where pyproject.toml lives.
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.cwd": "${workspaceFolder}/backend",
+    "python.testing.pytestArgs": ["tests"]
+}

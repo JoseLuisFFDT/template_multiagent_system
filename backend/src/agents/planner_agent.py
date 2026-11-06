@@ -14,5 +14,5 @@ class PlannerAgent(BaseAgent):
     description: str = "Splits a request into short subtasks."
 
     def ask(self, state: SubgraphState) -> dict:
-        plan = self.structured_invoke(self.build_messages(state.topic))
+        plan = self.structured_invoke(self.build_messages(f"Request: {state.topic}"))
         return {"plan": plan}

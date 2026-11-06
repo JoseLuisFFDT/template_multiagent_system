@@ -9,9 +9,10 @@ LangGraph features shown here
 * A node with a private ``input_schema`` (``SubtaskInput``).
 * A plain function node (``assemble``) mixed with agent nodes.
 """
+from langchain_core.exceptions import OutputParserException
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Send
+from langgraph.types import RetryPolicy, Send
 
 from src.pydantic_models.graph_states.subgraph_state import SubgraphState, SubtaskInput
 
@@ -51,7 +52,11 @@ def build_subgraph(overrides: dict | None = None) -> CompiledStateGraph:
 
     builder = StateGraph(SubgraphState)
 
-    builder.add_node("planner_agent", planner.ask)
+    # RetryPolicy: structured output can fail now and then (the LLM returns text that does not
+    # match the schema). The default policy ignores parsing errors, so we opt in explicitly.
+    builder.add_node(
+        "planner_agent", planner.ask, retry_policy=RetryPolicy(max_attempts=3, retry_on=OutputParserException)
+    )
     # input_schema: this node receives a SubtaskInput (the Send payload), not a SubgraphState.
     builder.add_node("worker", worker.ask, input_schema=SubtaskInput)
     builder.add_node("assemble", assemble)

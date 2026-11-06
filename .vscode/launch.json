@@ -2,22 +2,45 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run demo (main.py)",
+            "name": "Backend: run API (main.py)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+            "program": "${workspaceFolder}/backend/main.py",
+            "cwd": "${workspaceFolder}/backend",
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Run offline tests (pytest)",
+            "name": "Backend: chat in terminal (cli.py --chat)",
             "type": "debugpy",
             "request": "launch",
+            "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+            "program": "${workspaceFolder}/backend/cli.py",
+            "args": ["--chat"],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Backend: offline tests (pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
             "module": "pytest",
             "args": ["-q"],
-            "cwd": "${workspaceFolder}",
+            "cwd": "${workspaceFolder}/backend",
             "justMyCode": false
+        },
+        {
+            "name": "Frontend: Streamlit chat",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/frontend/.venv/Scripts/python.exe",
+            "module": "streamlit",
+            "args": ["run", "app.py"],
+            "cwd": "${workspaceFolder}/frontend",
+            "console": "integratedTerminal"
         }
     ]
 }
