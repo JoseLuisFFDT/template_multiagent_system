@@ -74,3 +74,60 @@ def test_approve_unknown_thread_is_404_and_already_finished_run_is_409():
     payload = {"thread_id": paused["thread_id"], "approved": True}
     assert client.post("/approve", json=payload).status_code == 200
     assert client.post("/approve", json=payload).status_code == 409  # nothing left to approve
+
+
+# ───────────────────────────── trace: how the state evolves ─────────────────────────────
+
+
+def test_chat_trace_shows_each_node_with_what_it_wrote_and_the_state_after():
+    body = chat_client("Hello!").post("/chat", json={"message": "hi"}).json()
+
+    steps = [(s["graph"], s["node"]) for s in body["trace"]]
+    assert steps == [("main", "(start)"), ("main", "mastermind_agent"), ("main", "chat_agent")]
+
+    start, mastermind, chat = body["trace"]
+    assert start["update"] is None and start["state"]["human_message"] == "hi"
+    assert mastermind["update"] == {"route": "chat_agent"}             # what the node wrote...
+    assert mastermind["state"]["route"] == "chat_agent"                # ...and the state after it
+    assert chat["update"] == {"ai_message": "Hello!"}
+    assert chat["state"]["ai_message"] == "Hello!" and chat["state"]["human_message"] == "hi"
+    assert [s["index"] for s in body["trace"]] == [1, 2, 3]
+
+
+def test_subgraph_steps_appear_with_their_own_state():
+    body = subgraph_client().post("/chat", json={"message": "go"}).json()
+    inner = [s for s in body["trace"] if s["graph"] == "subgraph_agent"]
+
+    assert [s["node"] for s in inner] == ["(start)", "planner_agent", "worker", "worker", "worker", "assemble"]
+    assert set(inner[0]["state"]) == {"topic", "answers"}               # SubgraphState keys, not MainState
+    assert inner[1]["update"]["plan"]["subtasks"] == ["A", "B", "C"]
+    assert len(inner[-1]["state"]["answers"]) == 3 and inner[-1]["state"]["result"]
+    main_state_keys = set(body["trace"][0]["state"]) | set(body["trace"][-1]["state"] or {})
+    assert not ({"plan", "answers", "topic"} & main_state_keys)         # nothing leaks into the main state
+    assert body["trace"][-1]["node"] == "__interrupt__"                 # the pause is part of the trace
+    assert "waiting_for_human" in body["trace"][-1]["update"]
+
+
+def test_approve_trace_covers_only_the_resumed_part():
+    client = subgraph_client()
+    paused = client.post("/chat", json={"message": "go"}).json()
+
+    done = client.post("/approve", json={"thread_id": paused["thread_id"], "approved": True}).json()
+
+    assert [s["node"] for s in done["trace"]] == ["(start)", "human_approval"]
+    assert done["trace"][1]["update"] == {"approval": "approved"}
+
+
+def test_a_failing_graph_returns_502_with_the_reason():
+    chat = ChatAgent()
+
+    def boom(messages):
+        raise RuntimeError("LLM provider is down")
+
+    chat.llm = type("BrokenLLM", (), {"invoke": staticmethod(boom)})()
+    graph = build_main_graph({"mastermind_agent": mastermind_routing_to("chat_agent"), "chat_agent": chat})
+
+    response = TestClient(create_app(graph)).post("/chat", json={"message": "hi"})
+
+    assert response.status_code == 502
+    assert "RuntimeError: LLM provider is down" in response.json()["detail"]

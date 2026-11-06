@@ -8,6 +8,7 @@ The main graph is built once, when the server starts, and shared by every reques
 checkpointer keeps the state of paused runs, so ``/approve`` can resume the run that ``/chat``
 started (they are linked by ``thread_id``).
 """
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
@@ -15,8 +16,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
-from src.api.schemas import ApprovalRequest, ChatRequest, ChatResponse
+from src.api.schemas import ApprovalRequest, ChatRequest, ChatResponse, TraceStep
+from src.api.trace import run_with_trace
 from src.graphs.main_graph import build_main_graph
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def get_graph(request: Request) -> CompiledStateGraph:
@@ -40,6 +44,19 @@ async def graph_status(graph: CompiledStateGraph, thread_id: str) -> ChatRespons
     return ChatResponse(thread_id=thread_id, status="completed", route=route, answer=snapshot.values.get("ai_message"))
 
 
+async def run_graph(graph: CompiledStateGraph, payload, thread_id: str) -> ChatResponse:
+    """Run (or resume) the graph, then describe where it ended up, including the step-by-step trace."""
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        trace: list[TraceStep] = await run_with_trace(graph, payload, config)
+    except Exception as exc:  # e.g. the LLM provider failed: tell the caller WHY instead of a bare 500
+        logger.exception("graph run failed (thread %s)", thread_id)
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
+    response = await graph_status(graph, thread_id)
+    response.trace = trace
+    return response
+
+
 def create_app(graph: CompiledStateGraph | None = None) -> FastAPI:
     """Build the FastAPI app. Tests pass a graph with a stubbed LLM; production passes nothing."""
 
@@ -59,10 +76,7 @@ def create_app(graph: CompiledStateGraph | None = None) -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(body: ChatRequest, graph: CompiledStateGraph = Depends(get_graph)) -> ChatResponse:
         # Every request starts a fresh run: a new thread_id = no memory of earlier requests.
-        thread_id = str(uuid.uuid4())
-        config = {"configurable": {"thread_id": thread_id}}
-        await graph.ainvoke({"human_message": body.message}, config)
-        return await graph_status(graph, thread_id)
+        return await run_graph(graph, {"human_message": body.message}, str(uuid.uuid4()))
 
     @app.post("/approve", response_model=ChatResponse)
     async def approve(body: ApprovalRequest, graph: CompiledStateGraph = Depends(get_graph)) -> ChatResponse:
@@ -74,8 +88,7 @@ def create_app(graph: CompiledStateGraph | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="This run is not waiting for approval.")
 
         # Resume the paused run: `interrupt()` inside human_approval returns this value.
-        await graph.ainvoke(Command(resume="yes" if body.approved else "no"), config)
-        return await graph_status(graph, body.thread_id)
+        return await run_graph(graph, Command(resume="yes" if body.approved else "no"), body.thread_id)
 
     return app
 

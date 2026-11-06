@@ -31,13 +31,41 @@ Models are set in `agents_config.yaml` (change the `model` fields if your Groq a
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `POST /chat` | `{"message": "Reverse the text 'langgraph'"}` | `{"thread_id", "status", "route", "answer", "question", "preview"}` |
+| `POST /chat` | `{"message": "Reverse the text 'langgraph'"}` | `{"thread_id", "status", "route", "answer", "question", "preview", "trace"}` |
 | `POST /approve` | `{"thread_id": "...", "approved": true}` | the same shape, once the run has resumed |
 | `GET /health` | | `{"status": "ok"}` |
 
 `status` is `completed` (read `answer`) or `needs_approval` (the graph is paused; read `question` and `preview`, then call
 `/approve` with the same `thread_id`). `/approve` answers `404` for an unknown `thread_id` and `409` if that run is not
-waiting for approval.
+waiting for approval. If the graph itself fails (for example the LLM provider is down) the API answers `502` with the
+reason in `detail`, instead of a bare `500`.
+
+### The trace: how the state evolves
+
+Every response carries a `trace`: the steps the graph executed **during that call**, in order, including the steps of
+subgraphs. This is the traceability view the frontend draws under each answer.
+
+```json
+{"index": 2, "graph": "main", "node": "mastermind_agent",
+ "update": {"route": "chat_agent"},
+ "state":  {"human_message": "hi", "route": "chat_agent", "messages": []}}
+```
+
+| Field | Meaning |
+|---|---|
+| `index` | Position in the run (1, 2, 3...). |
+| `graph` | `main`, or the agent that owns the subgraph (`subgraph_agent`). Steps of different graphs interleave in order. |
+| `node` | The node that ran. `(start)` is the state of a graph before any node ran; `__interrupt__` is the pause for human approval. |
+| `update` | **Exactly what the node returned**: only the keys it changed. |
+| `state` | The **full state of that graph right after the step**, with every reducer already applied. |
+
+`update` against `state` is the whole lesson about state: a node writes a few keys; the graph merges them. Subgraph steps show
+`SubgraphState` (`topic`, `plan`, `answers`, `result`), never `MainState`, which is the two-states design made visible. For an
+approval flow, `/chat` returns the trace up to the pause and `/approve` returns the trace of the resumed part.
+
+It is built in `src/api/trace.py` with `graph.astream(..., stream_mode=["updates", "values"], subgraphs=True)`: `updates` gives what a
+node returned, `values` gives the full state, and each update is paired with the snapshot that follows it. The trace comes back
+when the call finishes; it is not streamed live.
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" `
