@@ -13,24 +13,61 @@ Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/) and a [Groq](https:
 ```powershell
 uv sync                          # create .venv and install dependencies
 copy .env.example .env           # then edit .env and set GROQ_API_KEY
-uv run python main.py --chat     # talk to the system interactively (see next section)
-uv run python main.py            # run the demo (one request per agent)
-uv run python main.py "What is 2 + 3?"                  # your own request
+uv run python main.py            # start the API (http://127.0.0.1:8000, docs at /docs)
+uv run streamlit run src/frontend/app.py   # in a 2nd terminal: the chat UI (http://localhost:8501)
+uv run python cli.py --chat      # or talk to the system from the terminal, no server needed
 uv run pytest                    # offline tests, no API key needed
 ```
 
 Models are set in `agents_config.yaml` (change the `model` fields if your Groq account has no access to them).
 
+## Run the API and the chat UI
+
+`main.py` is the **entry point of the application**: it starts a FastAPI server that exposes the multi-agent system over HTTP.
+`src/frontend/app.py` is a minimal Streamlit chat that talks to that API (it never imports the agents).
+
+```text
+Streamlit chat  --HTTP-->  FastAPI (main.py / src/api/app.py)  -->  main graph (mastermind -> agents)
+```
+
+```powershell
+uv run python main.py                       # terminal 1: API on http://127.0.0.1:8000  (interactive docs: /docs)
+uv run streamlit run src/frontend/app.py    # terminal 2: chat UI on http://localhost:8501
+```
+
+The UI is one chat box. Each answer shows which agent produced it. When the graph pauses for human approval
+(the `subgraph_agent` case) the UI shows the preview with **Approve / Reject** buttons and keeps the input disabled until
+you decide. Set `API_URL` if the API is not on `localhost:8000`; `HOST` and `PORT` change where the API listens.
+
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST /chat` | `{"message": "Reverse the text 'langgraph'"}` | `{"thread_id", "status", "route", "answer", "question", "preview"}` |
+| `POST /approve` | `{"thread_id": "...", "approved": true}` | the same shape, once the run has resumed |
+| `GET /health` | | `{"status": "ok"}` |
+
+`status` is `completed` (read `answer`) or `needs_approval` (the graph is paused; read `question` and `preview`, then call
+`/approve` with the same `thread_id`). `/approve` answers `404` for an unknown `thread_id` and `409` if that run is not
+waiting for approval.
+
+```powershell
+curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" `
+     -d '{\"message\": \"Reverse the text langgraph\"}'
+```
+
+How the pieces fit: the graph is built once when the server starts (`create_app` in `src/api/app.py`). Its checkpointer lives in
+the server's memory, which is what lets `/approve` resume the run that `/chat` started. Consequences: a server restart forgets
+paused runs, and every `/chat` is an independent run with no memory of earlier messages (see "Not covered").
+
 ## Talk to the mastermind from the terminal
 
 The entry point is always the **mastermind**: you never choose an agent, you just write a request and it decides
-who handles it. `main.py` offers three ways to do that:
+who handles it. `cli.py` offers three ways to do that in the terminal:
 
 | Command | What it does |
 |---|---|
-| `uv run python main.py --chat` | **Interactive.** Type a request, read the answer, type another. An empty line exits. |
-| `uv run python main.py "Reverse the text 'langgraph'"` | Sends one request and exits. |
-| `uv run python main.py` | Runs the demo: one request per agent. |
+| `uv run python cli.py --chat` | **Interactive.** Type a request, read the answer, type another. An empty line exits. |
+| `uv run python cli.py "Reverse the text 'langgraph'"` | Sends one request and exits. |
+| `uv run python cli.py` | Runs the demo: one request per agent. |
 
 Add `--auto-approve` to skip the human-approval question (see below).
 
@@ -187,9 +224,12 @@ adapter mapping in and out. If parent and subgraph shared keys you could skip th
 ## Project structure
 
 ```text
-main.py                       # CLI demo: streams node events, handles the approval pause
+main.py                       # entry point: starts the FastAPI server
+cli.py                        # terminal client: streams node events, handles the approval pause
 agents_config.yaml            # per-agent LLM config (model, temperature, API-key variable, output model)
 src/
+├── api/                      # FastAPI: app.py (POST /chat, POST /approve) and schemas.py
+├── frontend/app.py           # Streamlit chat UI; talks to the API only
 ├── config.py                 # get_llm(): the one place where a chat model is created
 ├── core/
 │   ├── base_agent.py         # BaseAgent: config, prompt, LLM, structured_invoke, ask()
@@ -224,7 +264,7 @@ capabilities. Because wiring is separate from behaviour, an agent can be tested 
 | Tool calling (`bind_tools`, `ToolNode`) | `agents/tool_agent.py`, `tools/demo_tools.py` |
 | MCP client and server, prebuilt `create_agent` | `agents/mcp_agent.py`, `mcp_servers/demo_server.py` |
 | `RetryPolicy` | `graphs/main_graph.py` (on the MCP node) |
-| Human-in-the-loop (`interrupt`) + checkpointer | `graphs/main_graph.py`, `main.py` |
+| Human-in-the-loop (`interrupt`) + checkpointer | `graphs/main_graph.py`, `api/app.py`, `cli.py` |
 | Structured output | `core/base_agent.py` (`structured_invoke`) |
 | Dependency injection for tests | `build_main_graph(overrides=...)` |
 

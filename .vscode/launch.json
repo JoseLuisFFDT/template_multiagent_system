@@ -2,10 +2,29 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run demo (main.py)",
+            "name": "Run API (main.py)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Run chat UI (streamlit)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": ["run", "src/frontend/app.py"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Chat in terminal (cli.py --chat)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/cli.py",
+            "args": ["--chat"],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": true
