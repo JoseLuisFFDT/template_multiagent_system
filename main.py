@@ -66,6 +66,13 @@ async def main() -> None:
     auto_approve = "--auto-approve" in sys.argv
 
     graph = build_main_graph()
+
+    if "--chat" in sys.argv:
+        # Each line you type is a new request (a new thread_id): there is no memory between them.
+        while message := input("\nYou (empty line to exit): ").strip():
+            await run_request(graph, message, auto_approve=auto_approve)
+        return
+
     for message in args or DEMO_REQUESTS:
         # Without a message on the command line the demo must not stop to ask a human.
         await run_request(graph, message, auto_approve=auto_approve or not args)

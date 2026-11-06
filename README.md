@@ -13,12 +13,73 @@ Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/) and a [Groq](https:
 ```powershell
 uv sync                          # create .venv and install dependencies
 copy .env.example .env           # then edit .env and set GROQ_API_KEY
+uv run python main.py --chat     # talk to the system interactively (see next section)
 uv run python main.py            # run the demo (one request per agent)
 uv run python main.py "What is 2 + 3?"                  # your own request
 uv run pytest                    # offline tests, no API key needed
 ```
 
 Models are set in `agents_config.yaml` (change the `model` fields if your Groq account has no access to them).
+
+## Talk to the mastermind from the terminal
+
+The entry point is always the **mastermind**: you never choose an agent, you just write a request and it decides
+who handles it. `main.py` offers three ways to do that:
+
+| Command | What it does |
+|---|---|
+| `uv run python main.py --chat` | **Interactive.** Type a request, read the answer, type another. An empty line exits. |
+| `uv run python main.py "Reverse the text 'langgraph'"` | Sends one request and exits. |
+| `uv run python main.py` | Runs the demo: one request per agent. |
+
+Add `--auto-approve` to skip the human-approval question (see below).
+
+A real session (`--chat`). While the graph runs you see each node that executes (`->`); nodes inside a subgraph or a
+prebuilt agent are indented with the agent that owns them:
+
+```text
+You (empty line to exit): Reverse the text 'langgraph'
+======================================================================
+USER: Reverse the text 'langgraph'
+======================================================================
+-> mastermind_agent                     <- the router picked an agent...
+  -> model   (inside mcp_agent)         <- ...which asked its LLM,
+  -> tools   (inside mcp_agent)         <- ...called the MCP tool,
+  -> model   (inside mcp_agent)         <- ...and wrote the answer
+-> mcp_agent
+
+ROUTE : mcp_agent                       <- who handled it (state.route)
+
+ASSISTANT:
+The reversed text is: hparggnal.
+```
+
+What to type to reach each agent (the mastermind reads the agents' `description`, so natural phrasing works):
+
+| You write | Routed to | What you will see |
+|---|---|---|
+| `Hi! What can you do?` | `chat_agent` | A short free-text answer. |
+| `What is 1250 + 4750? And what time is it?` | `tool_agent` | `tool_agent -> tools -> tool_agent` loop. |
+| `Reverse the text 'langgraph'` | `mcp_agent` | The tool call goes to the MCP server process. |
+| `Answer in parallel: what is a cat, a dog and a bird?` | `subgraph_agent` | Planner, 3 parallel workers, assemble, then the **pause**. |
+
+**The pause.** After `subgraph_agent` the graph stops at `human_approval` and prints `[PAUSED] Do you approve this answer?`
+with a preview. Answer `yes` to deliver it; anything else rejects it. The run can resume because the state was saved by
+the checkpointer under the request's `thread_id`.
+
+**Limits to keep in mind.** Each line you type is an independent request (a new `thread_id`), so the system does not
+remember earlier turns. If you want a conversation, reuse the same `thread_id` and keep `messages` in the state
+(see "Not covered"). To talk to the graph from your own code instead of the CLI:
+
+```python
+import asyncio
+from src.graphs.main_graph import build_main_graph
+
+graph = build_main_graph()
+config = {"configurable": {"thread_id": "my-conversation"}}
+result = asyncio.run(graph.ainvoke({"human_message": "Reverse the text 'langgraph'"}, config))
+print(result["route"], result["ai_message"])
+```
 
 ## What the demo shows
 
@@ -37,18 +98,91 @@ flowchart TD
     MM ==> CH[chat_agent]
     MM ==> TA[tool_agent]
     MM ==> MA[mcp_agent]
-    MM ==> SA[["subgraph_agent"]]
+    MM ==> SUB
+
+    subgraph SUB["subgraph_agent: a whole graph with its OWN state (SubgraphState)"]
+        IN["adapter IN<br/>topic = human_message"] --> PL["planner_agent<br/>writes: plan"]
+        PL ==>|"Send x N<br/>one per subtask"| W["worker x N, in parallel<br/>each writes: answers"]
+        W -->|"fan-in: waits for all N<br/>reducer operator.add"| AS["assemble<br/>writes: result"]
+        AS --> OUT["adapter OUT<br/>ai_message = result"]
+    end
+
     TA -.->|tool calls| T[tools]
     T --> TA
     TA -.->|final answer| E((END))
     CH --> E
     MA --> E
-    SA --> HA["human_approval<br/>(interrupt)"] --> E
+    SUB --> HA["human_approval<br/>(interrupt)"] --> E
 ```
 
-Inside `subgraph_agent`: `START -> planner_agent --Send x N--> worker (parallel) -> assemble -> END`.
-
 Arrows: `-->` normal edge, `-.->` conditional edge, `==>` the node chooses (`Command` / `Send`).
+The big box is **one node** of the main graph (`subgraph_agent`); everything inside it is a separate graph with its own
+state. The next section explains it step by step.
+
+## The subgraph in detail
+
+A **subgraph** is a complete graph used as a single step of another graph. Here `subgraph_agent` receives the user request,
+splits it into subtasks, solves them **in parallel** and merges the answers. It is the only place in the repo with a second
+state, parallel fan-out (`Send`) and a reducer that merges parallel writes.
+
+### Two states that never mix
+
+| | `MainState` (main graph) | `SubgraphState` (subgraph) |
+|---|---|---|
+| File | `graph_states/main_state.py` | `graph_states/subgraph_state.py` |
+| Keys | `human_message`, `route`, `messages`, `approval`, `ai_message` | `topic`, `plan`, `answers`, `result` |
+
+They share **no keys**, so the subgraph cannot read or overwrite anything of the main graph by accident. Because the schemas
+differ, the compiled subgraph cannot be added as a node directly: `SubgraphAgent.ask` is the **adapter** that translates:
+
+```text
+MainState.human_message --(IN)--> SubgraphState.topic
+   ... the subgraph runs and fills plan, answers, result ...
+SubgraphState.result    --(OUT)-> MainState.ai_message      (the only key written back)
+```
+
+### What happens, step by step
+
+| Step | Node | Reads | Writes | What happens |
+|---|---|---|---|---|
+| 0 | adapter IN | `MainState.human_message` | `SubgraphState.topic` | The request enters the subgraph. |
+| 1 | `planner_agent` | `topic` | `plan` | One LLM call with **structured output**: a `Plan` with 2-3 `subtasks`. |
+| 2 | `fan_out` (the edge) | `plan` | nothing | A conditional edge returns one `Send("worker", SubtaskInput(subtask=...))` per subtask. |
+| 3 | `worker` x N | its own `SubtaskInput` | `answers` | The N workers run **in the same step, in parallel**. Each sees only its subtask. |
+| 4 | `assemble` | `answers` | `result` | Plain function. Starts only when **all** workers are done (fan-in). |
+| 5 | adapter OUT | `result` | `MainState.ai_message` | The answer leaves the subgraph. Then `human_approval` pauses the main graph. |
+
+Three details worth remembering:
+
+- **`Send` carries a private payload.** The worker's input schema is `SubtaskInput` (just `subtask`), not `SubgraphState`.
+  The worker does not see `topic`, `plan` or the other workers' answers.
+- **`answers` needs a reducer.** The N workers write `answers` in the same step. Without `operator.add` LangGraph raises
+  `InvalidUpdateError`; with it the N one-item lists are concatenated.
+- **The number of workers is decided at runtime** by the LLM (the length of `plan.subtasks`), not by the graph wiring.
+  That is what `Send` is for.
+
+### See it running
+
+```text
+-> mastermind_agent
+  -> planner_agent   (inside subgraph_agent)
+  -> worker          (inside subgraph_agent)      <- three workers, same step
+  -> worker          (inside subgraph_agent)
+  -> worker          (inside subgraph_agent)
+  -> assemble        (inside subgraph_agent)
+-> subgraph_agent                                  <- back in the main graph: only ai_message was written
+[PAUSED] Do you approve this answer? (yes / no)
+```
+
+To watch the subgraph state change step by step, run the didactic tests with their printouts:
+
+```powershell
+uv run pytest tests/test_state_flow.py -s -k "test_2"
+```
+
+`test_2_b` prints the whole `SubgraphState` after every step, `test_2_c` shows what each worker receives and `test_2_d` shows the
+adapter mapping in and out. If parent and subgraph shared keys you could skip the adapter and write
+`builder.add_node("name", compiled_subgraph)`; the separate-state version is shown here because it is the general case.
 
 ## Project structure
 
